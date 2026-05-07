@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A Man & His Cave — Demand Planner</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #020617;
+            color: #e2e8f0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+        }
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+        .scrollbar-hide {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        .table-cell-edit {
+            background-color: rgba(251, 191, 36, 0.1);
+            border: 1px solid rgba(251, 191, 36, 0.3);
+        }
+        .table-cell-edit input {
+            background-color: rgba(251, 191, 36, 0.15);
+            border: none;
+            color: #e2e8f0;
+            width: 100%;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        .table-cell-edit input:focus {
+            outline: none;
+            background-color: rgba(251, 191, 36, 0.25);
+            box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.4);
+        }
+        .edited-indicator {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            background-color: #fbbf24;
+            border-radius: 50%;
+            margin-left: 4px;
+            vertical-align: middle;
+        }
+        .modal-overlay {
+            background-color: rgba(0, 0, 0, 0.7);
+        }
+        .sortable-header {
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        .sortable-header:hover {
+            color: #94a3b8;
+        }
+        .sort-indicator {
+            margin-left: 4px;
+            font-size: 12px;
+            vertical-align: middle;
+        }
+        .loading-spinner {
+            display: inline-block;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            from {
+                transform: rotate(0deg);
+            }
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // === LIVE DATA (refreshed 4/13/2026, 9:17:13 AM) ===
+        const FALLBACK_PRODUCTS = [];
+        const FALLBACK_VARIANTS = [];
+        const FALLBACK_META = {"generatedAt":"2026-04-12T23:17:13.978Z","settings":{"planningWeeks":8,"leadTimeWeeks":12,"safetyBufferWeeks":2},"sources":{"soh":"Static (baseline)","purchaseOrders":"Unleashed (live)","velocity":"Static ABC analysis","productCatalog":"Static + live overlays"}};
+        // === END LIVE DATA ===
+
+        const { useState, useEffect, useMemo, useCallback } = React;
+
+        // ============================================================================
+        // UTILITY FUNCTIONS
+        // ============================================================================
+
+        const round = (value) => Math.round(value);
+
+        const calculateMetrics = (product, settings) => {
+            const soh = product.stockOnHand ?? 0;
+            const onPurchase = product.onPurchase ?? 0;
+            const weeklyVel = product.weeklyVelocity ?? 0;
+            const planningWeeks = settings.planningWeeks ?? 8;
+            const leadTimeWeeks = settings.leadTimeWeeks ?? 12;
+            const safetyBufferWeeks = settings.safetyBufferWeeks ?? 2;
+
+            const weeksOfStock = weeklyVel > 0 ? (soh + onPurchase) / weeklyVel : 0;
+            const demand8wk = round(weeklyVel * planningWeeks);
+            const minStock = round(weeklyVel * safetyBufferWeeks);
+            const maxStock = round(weeklyVel * (leadTimeWeeks + planningWeeks));
+            const reorderPoint = round(weeklyVel * leadTimeWeeks);
+            const reorderQty = Math.max(0, maxStock - (soh + onPurchase));
+
+            let status = 'OK';
+            const available = soh + onPurchase;
+            if (available <= minStock) {
+                status = 'CRITICAL';
+            } else if (available <= reorderPoint) {
+                status = 'ORDER NOW';
+            } else if (weeksOfStock <= planningWeeks) {
+                status = 'LOW';
+            }
+
+            return {
+                weeksOfStock: parseFloat(weeksOfStock.toFixed(1)),
+                demand8wk,
+                minStock,
+                maxStock,
+                reorderPoint,
+                reorderQty,
+                status,
+            };
+        };
+
+        // ============================================================================
+        // SUBCOMPONENTS
+        // ============================================================================
+
+        const LoadingSpinner = () => (
+            <div className="flex items-center justify-center py-12">
+                <div className="text-center">
+                    <div className="loading-spinner text-slate-400 mb-4">
+                        <svg className="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none" opacity="0.2" />
+                            <path d="M12 2A10 10 0 0112 22" stroke="currentColor" strokeWidth="2" fill="none" />
+                        </svg>
+                    </div>
+                    <p className="text-slate-400">Loading demand plan...</p>
+                </div>
+            </div>
+        );
+
+        const ErrorBanner = ({ error, onRetry }) => (
+            <div className="bg-red-950 border border-red-800 rounded-lg p-4 mb-6 flex items-center justify-between">
+                <div>
+                    <p className="text-red-100 font-medium">Failed to load demand plan</p>
+                    <p className="text-red-200 text-sm mt-1">{error}</p>
+                </div>
+                <button
+                    onClick={onRetry}
+                    className="ml-4 px-4 py-2 bg-red-700 hover:bg-red-600 text-white rounded font-medium transition-colors whitespace-nowrap"
+                >
+                    Retry
+                </button>
+            </div>
+        );
+
+        const MetaBanner = ({ meta }) => {
+            const generatedAt = new Date(meta.generatedAt);
+            const timeStr = generatedAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+            const dateStr = generatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+            return (
+                <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 mb-6">
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 text-sm">
+                        <div>
+                            <p className="text-slate-500 text-xs uppercase tracking-wide">Last Refresh</p>
+                            <p className="text-slate-100 font-medium">{timeStr}</p>
+                            <p className="text-slate-400 text-xs">{dateStr}</p>
+                        </div>
+                        <div>
+                            <p className="text-slate-500 text-xs uppercase tracking-wide">Planning Weeks</p>
+                            <p className="text-slate-100 font-medium">{meta.settings.planningWeeks}</p>
+                        </div>
+                        <div>
+                            <p className="text-slate-500 text-xs uppercase tracking-wide">Lead Time</p>
+                            <p className="text-slate-100 font-medium">{meta.settings.leadTimeWeeks} weeks</p>
+                        </div>
+                        <div>
+                            <p className="text-slate-500 text-xs uppercase tracking-wide">Safety Buffer</p>
+                            <p className="text-slate-100 font-medium">{meta.settings.safetyBufferWeeks} weeks</p>
+                        </div>
+                        <div>
+                            <p className="text-slate-500 text-xs uppercase tracking-wide">Data Sources</p>
+                            <p className="text-slate-100 text-xs">
+                                <span className="block">Unleashed, PMA, Shopify</span>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const SettingsPanel = ({ settings, onSettingsChange, isOpen, onToggle }) => (
+            <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden mb-6">
+                <button
+                    onClick={onToggle}
+                    className="w-full px-6 py-4 flex items-center justify-between hover:bg-slate-850 transition-colors"
+                >
+                    <h3 className="text-lg font-semibold text-slate-100">Planning Settings</h3>
+                    <svg className={`w-5 h-5 text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                    </svg>
+                </button>
+                {isOpen && (
+                    <div className="border-t border-slate-800 px-6 py-4">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div>
+                                <label className="block text-sm font-medium text-slate-300 mb-2">Planning Weeks</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    value={settings.planningWeeks}
+                                    onChange={(e) => onSettingsChange({ ...settings, planningWeeks: parseInt(e.target.value) || 1 })}
+                                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded font-mono text-slate-100 focus:outline-none focus:border-blue-500"
+                                />
+                                <p className="text-xs text-slate-500 mt-1">Weeks ahead to plan for</p>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-300 mb-2">Lead Time Weeks</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    value={settings.leadTimeWeeks}
+                                    onChange={(e) => onSettingsChange({ ...settings, leadTimeWeeks: parseInt(e.target.value) || 1 })}
+                                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded font-mono text-slate-100 focus:outline-none focus:border-blue-500"
+                                />
+                                <p className="text-xs text-slate-500 mt-1">Supplier lead time</p>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-300 mb-2">Safety Buffer Weeks</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    value={settings.safetyBufferWeeks}
+                                    onChange={(e) => onSettingsChange({ ...settings, safetyBufferWeeks: parseInt(e.target.value) || 1 })}
+                                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded font-mono text-slate-100 focus:outline-none focus:border-blue-500"
+                                />
+                                <p className="text-xs text-slate-500 mt-1">Minimum stock buffer</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+
+        const SummaryStats = ({ products, settings }) => {
+            const stats = useMemo(() => {
+                const gradeA = products.filter(p => p.grade === 'A').length;
+                const gradeB = products.filter(p => p.grade === 'B').length;
+                const gradeC = products.filter(p => p.grade === 'C').length;
+
+                let critical = 0, orderNow = 0, low = 0, ok = 0;
+                products.forEach(p => {
+                    const metrics = calculateMetrics(p, settings);
+                    if (metrics.status === 'CRITICAL') critical++;
+                    else if (metrics.status === 'ORDER NOW') orderNow++;
+                    else if (metrics.status === 'LOW') low++;
+                    else ok++;
+                });
+
+                return { gradeA, gradeB, gradeC, critical, orderNow, low, ok, total: products.length };
+            }, [products, settings]);
+
+            const StatBox = ({ label, value, color = 'text-slate-100' }) => (
+                <div className="text-center">
+                    <p className="text-slate-500 text-xs uppercase tracking-wide mb-1">{label}</p>
+                    <p className={`text-2xl font-bold ${color}`}>{value}</p>
+                </div>
+            );
+
+            return (
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-9 gap-4 mb-6">
+                    <StatBox label="Total" value={stats.total} />
+                    <StatBox label="Grade A" value={stats.gradeA} color="text-emerald-400" />
+                    <StatBox label="Grade B" value={stats.gradeB} color="text-amber-400" />
+                    <StatBox label="Grade C" value={stats.gradeC} color="text-slate-400" />
+                    <StatBox label="Critical" value={stats.critical} color="text-red-400" />
+                    <StatBox label="Order Now" value={stats.orderNow} color="text-orange-400" />
+                    <StatBox label="Low" value={stats.low} color="text-yellow-400" />
+                    <StatBox label="OK" value={stats.ok} color="text-green-400" />
+                </div>
+            );
+        };
+
+        const PODetailModal = ({ pos, onClose }) => {
+            if (!pos || pos.length === 0) return null;
+
+            return (
+                <div className="modal-overlay fixed inset-0 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-900 border border-slate-800 rounded-lg shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+                        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+                            <h3 className="text-lg font-semibold text-slate-100">Purchase Orders</h3>
+                            <button
+                                onClick={onClose}
+                                className="text-slate-400 hover:text-slate-200 transition-colors"
+                            >
+                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                        <div className="px-6 py-4 max-h-96 overflow-y-auto scrollbar-hide">
+                            <div className="space-y-4">
+                                {pos.map((po, idx) => (
+                                    <div key={idx} className="bg-slate-800 rounded p-4">
+                                        <p className="text-sm font-medium text-slate-100">
+                                            <span className="text-slate-400">PO:</span> {po.poNumber}
+                                        </p>
+                                        <p className="text-sm text-slate-300 mt-2">
+                                            <span className="text-slate-400">Qty Outstanding:</span> {po.outstanding}
+                                        </p>
+                                        <p className="text-sm text-slate-300 mt-1">
+                                            <span className="text-slate-400">ETA:</span> {po.eta}
+                                        </p>
+                                        <p className="text-sm text-slate-300 mt-1">
+                                            <span className="text-slate-400">Supplier:</span> {po.supplierName}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const VariantModal = ({ variants, productName, onClose }) => {
+            if (!variants || variants.length === 0) return null;
+
+            return (
+                <div className="modal-overlay fixed inset-0 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-900 border border-slate-800 rounded-lg shadow-xl max-w-4xl w-full max-h-96 flex flex-col" onClick={(e) => e.stopPropagation()}>
+                        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+                            <h3 className="text-lg font-semibold text-slate-100">Variants: {productName}</h3>
+                            <button
+                                onClick={onClose}
+                                className="text-slate-400 hover:text-slate-200 transition-colors"
+                            >
+                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                        <div className="px-6 py-4 overflow-x-auto scrollbar-hide flex-1">
+                            <table className="w-full text-sm">
+                                <thead>
+                                    <tr className="border-b border-slate-700">
+                                        <th className="text-left py-3 px-4 text-slate-300 font-semibold">Variant SKU</th>
+                                        <th className="text-left py-3 px-4 text-slate-300 font-semibold">Title</th>
+                                        <th className="text-right py-3 px-4 text-slate-300 font-semibold">Recent 8wk Vel</th>
+                                        <th className="text-right py-3 px-4 text-slate-300 font-semibold">Mid 8wk Vel</th>
+                                        <th className="text-right py-3 px-4 text-slate-300 font-semibold">Early 8wk Vel</th>
+                                        <th className="text-right py-3 px-4 text-slate-300 font-semibold">Weighted Weekly</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {variants.map((v, idx) => (
+                                        <tr key={idx} className="border-b border-slate-800 hover:bg-slate-800 transition-colors">
+                                            <td className="py-3 px-4 font-mono text-slate-300">{v.variantSku}</td>
+                                            <td className="py-3 px-4 text-slate-100">{v.variantTitle}</td>
+                                            <td className="py-3 px-4 text-right text-slate-300">{v.velRecent?.toFixed(2) ?? '—'}</td>
+                                            <td className="py-3 px-4 text-right text-slate-300">{v.velMid?.toFixed(2) ?? '—'}</td>
+                                            <td className="py-3 px-4 text-right text-slate-300">{v.velEarly?.toFixed(2) ?? '—'}</td>
+                                            <td className="py-3 px-4 text-right text-slate-100 font-medium">{v.weightedWeekly?.toFixed(2) ?? '—'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const GradeBadge = ({ grade }) => {
+            const colors = {
+                A: 'bg-emerald-900 text-emerald-100 border-emerald-700',
+                B: 'bg-amber-900 text-amber-100 border-amber-700',
+                C: 'bg-slate-800 text-slate-100 border-slate-700',
+            };
+            return (
+                <span className={`inline-block px-2 py-1 rounded text-xs font-semibold border ${colors[grade] || colors.C}`}>
+                    {grade}
+                </span>
+            );
+        };
+
+        const StatusBadge = ({ status }) => {
+            const colors = {
+                CRITICAL: 'bg-red-900 text-red-100 border-red-700',
+                'ORDER NOW': 'bg-orange-900 text-orange-100 border-orange-700',
+                LOW: 'bg-yellow-900 text-yellow-100 border-yellow-700',
+                OK: 'bg-green-900 text-green-100 border-green-700',
+            };
+            return (
+                <span className={`inline-block px-2 py-1 rounded text-xs font-semibold border ${colors[status] || colors.OK}`}>
+                    {status}
+                </span>
+            );
+        };
+
+        const WeeksOfStockCell = ({ value }) => {
+            let color = 'text-slate-100';
+            if (value < 4) color = 'text-red-400';
+            else if (value < 8) color = 'text-amber-400';
+            else color = 'text-green-400';
+            return <span className={`font-medium ${color}`}>{value.toFixed(1)}</span>;
+        };
+
+        // ============================================================================
+        // MAIN DASHBOARD COMPONENT
+        // ============================================================================
+
+        const DemandPlannerDashboard = () => {
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+            const [settings, setSettings] = useState({ planningWeeks: 8, leadTimeWeeks: 12, safetyBufferWeeks: 2 });
+            const [settingsOpen, setSettingsOpen] = useState(false);
+            const [searchText, setSearchText] = useState('');
+            const [gradeFilter, setGradeFilter] = useState('All');
+            const [statusFilter, setStatusFilter] = useState('All');
+            const [typeFilter, setTypeFilter] = useState('All');
+            const [sortColumn, setSortColumn] = useState(null);
+            const [sortAsc, setSortAsc] = useState(true);
+            const [editedProducts, setEditedProducts] = useState({});
+            const [selectedPOs, setSelectedPOs] = useState(null);
+            const [selectedVariants, setSelectedVariants] = useState(null);
+            const [selectedProductName, setSelectedProductName] = useState('');
+
+            // Fetch data — tries live API first, falls back to embedded data
+            const fetchData = useCallback(async (force = false) => {
+                setLoading(true);
+                setError(null);
+                try {
+                    const url = `/api/demand-plan${force ? '?force=true' : ''}`;
+                    const response = await fetch(url);
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    const json = await response.json();
+                    if (json.products && json.products.length > 0) {
+                        setData(json);
+                        setEditedProducts({});
+                    } else {
+                        throw new Error('API returned empty data');
+                    }
+                } catch (err) {
+                    console.warn('API unavailable, using embedded data:', err.message);
+                    if (typeof FALLBACK_PRODUCTS !== 'undefined' && FALLBACK_PRODUCTS.length > 0) {
+                        setData({
+                            products: FALLBACK_PRODUCTS,
+                            variants: typeof FALLBACK_VARIANTS !== 'undefined' ? FALLBACK_VARIANTS : [],
+                            meta: typeof FALLBACK_META !== 'undefined' ? FALLBACK_META : {
+                                generatedAt: new Date().toISOString(),
+                                settings: { planningWeeks: 8, leadTimeWeeks: 12, safetyBufferWeeks: 2 },
+                                sources: { soh: 'Embedded', purchaseOrders: 'None', velocity: 'Embedded', productCatalog: 'Embedded' }
+                            }
+                        });
+                        setEditedProducts({});
+                    } else {
+                        setError(err.message);
+                    }
+                }
+                setLoading(false);
+            }, []);
+
+            useEffect(() => {
+                fetchData();
+            }, [fetchData]);
+
+            // Apply filters and sorting
+            const filteredProducts = useMemo(() => {
+                if (!data || !data.products) return [];
+
+                let filtered = data.products.map(p => {
+                    const edited = editedProducts[p.parentSku] || {};
+                    const soh = edited.soh !== undefined ? edited.soh : p.stockOnHand;
+                    const onPurchase = edited.onPurchase !== undefined ? edited.onPurchase : p.onPurchase;
+                    const metrics = calculateMetrics({ ...p, stockOnHand: soh, onPurchase }, settings);
+
+                    return { ...p, stockOnHand: soh, onPurchase, ...metrics };
+                });
+
+                // Search filter
+                if (searchText) {
+                    const lower = searchText.toLowerCase();
+                    filtered = filtered.filter(p =>
+                        p.name.toLowerCase().includes(lower) ||
+                        p.parentSku.toLowerCase().includes(lower)
+                    );
+                }
+
+                // Grade filter
+                if (gradeFilter !== 'All') {
+                    filtered = filtered.filter(p => p.grade === gradeFilter);
+                }
+
+                // Status filter
+                if (statusFilter !== 'All') {
+                    filtered = filtered.filter(p => p.status === statusFilter);
+                }
+
+                // Type filter
+                if (typeFilter !== 'All') {
+                    filtered = filtered.filter(p => p.type === typeFilter);
+                }
+
+                // Sorting
+                if (sortColumn) {
+                    filtered.sort((a, b) => {
+                        let aVal = a[sortColumn];
+                        let bVal = b[sortColumn];
+
+                        if (typeof aVal === 'string') {
+                            aVal = aVal.toLowerCase();
+                            bVal = bVal.toLowerCase();
+                        }
+
+                        if (aVal < bVal) return sortAsc ? -1 : 1;
+                        if (aVal > bVal) return sortAsc ? 1 : -1;
+                        return 0;
+                    });
+                }
+
+                return filtered;
+            }, [data, settings, searchText, gradeFilter, statusFilter, typeFilter, sortColumn, sortAsc, editedProducts]);
+
+            const types = useMemo(() => {
+                if (!data || !data.products) return [];
+                return ['All', ...new Set(data.products.map(p => p.type))];
+            }, [data]);
+
+            const handleSort = (column) => {
+                if (sortColumn === column) {
+                    setSortAsc(!sortAsc);
+                } else {
+                    setSortColumn(column);
+                    setSortAsc(true);
+                }
+            };
+
+            const handleSOHChange = (parentSku, value) => {
+                setEditedProducts({
+                    ...editedProducts,
+                    [parentSku]: { ...editedProducts[parentSku], soh: value },
+                });
+            };
+
+            const handleOnPurchaseChange = (parentSku, value) => {
+                setEditedProducts({
+                    ...editedProducts,
+                    [parentSku]: { ...editedProducts[parentSku], onPurchase: value },
+                });
+            };
+
+            const exportToCSV = useCallback(() => {
+                const headers = [
+                    'Grade', 'Parent SKU', 'Product Name', 'Type',
+                    'SOH', 'On Purchase', 'Weekly Velocity', 'Vel Recent (8wk)', 'Vel Mid (prev 8wk)', 'Vel Early (prev 16wk)',
+                    'Weeks of Stock', '8-Wk Demand', 'Min Stock', 'Max Stock',
+                    'Reorder Point', 'Reorder Qty', 'Reorder Date', 'Status',
+                    'Open POs', 'PO Numbers'
+                ];
+
+                const esc = (val) => {
+                    if (val === null || val === undefined) return '';
+                    const s = String(val);
+                    return (s.includes(',') || s.includes('"') || s.includes('\n'))
+                        ? '"' + s.replace(/"/g, '""') + '"'
+                        : s;
+                };
+
+                const rows = filteredProducts.map(p => [
+                    p.grade,
+                    p.parentSku,
+                    p.name,
+                    p.type,
+                    p.stockOnHand,
+                    p.onPurchase,
+                    p.weeklyVelocity != null ? p.weeklyVelocity.toFixed(2) : '',
+                    p.velRecent != null ? p.velRecent : '',
+                    p.velMid != null ? p.velMid : '',
+                    p.velEarly != null ? p.velEarly : '',
+                    p.weeksOfStock != null ? p.weeksOfStock.toFixed(1) : '',
+                    p.demand8wk,
+                    p.minStock,
+                    p.maxStock,
+                    p.reorderPoint,
+                    p.reorderQty,
+                    p.reorderDate || '',
+                    p.status,
+                    (p.purchaseOrders || []).length,
+                    (p.purchaseOrders || []).map(po => po.poNumber).join(' | '),
+                ].map(esc).join(','));
+
+                const csv = '\uFEFF' + [headers.map(esc).join(','), ...rows].join('\n');
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `AMAHC_Demand_Plan_${new Date().toISOString().split('T')[0]}.csv`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, [filteredProducts]);
+
+            const SortableHeader = ({ column, label }) => (
+                <th
+                    onClick={() => handleSort(column)}
+                    className="sortable-header text-left py-3 px-4 text-slate-300 font-semibold text-xs uppercase tracking-wide"
+                >
+                    {label}
+                    {sortColumn === column && (
+                        <span className="sort-indicator">{sortAsc ? '↑' : '↓'}</span>
+                    )}
+                </th>
+            );
+
+            if (loading) {
+                return <LoadingSpinner />;
+            }
+
+            return (
+                <div className="min-h-screen bg-slate-950 text-slate-100 p-6">
+                    <div className="max-w-full mx-auto">
+                        {/* Header */}
+                        <div className="mb-8">
+                            <h1 className="text-4xl font-bold text-slate-100 mb-1">A Man & His Cave</h1>
+                            <p className="text-slate-400 text-lg">Demand Planner</p>
+                            <div className="flex items-center gap-3 mt-3">
+                                <span className="inline-flex items-center gap-2 px-3 py-1 bg-green-900 text-green-100 rounded-full text-xs font-semibold border border-green-700">
+                                    <span className="inline-block w-2 h-2 bg-green-400 rounded-full"></span>
+                                    Live Data
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* Error Banner */}
+                        {error && <ErrorBanner error={error} onRetry={() => fetchData()} />}
+
+                        {/* Meta Banner */}
+                        {data && data.meta && <MetaBanner meta={data.meta} />}
+
+                        {/* Settings Panel */}
+                        {data && data.meta && (
+                            <SettingsPanel
+                                settings={settings}
+                                onSettingsChange={setSettings}
+                                isOpen={settingsOpen}
+                                onToggle={() => setSettingsOpen(!settingsOpen)}
+                            />
+                        )}
+
+                        {/* Summary Stats */}
+                        {data && data.products && <SummaryStats products={data.products} settings={settings} />}
+
+                        {/* Filters & Search */}
+                        {data && data.products && (
+                            <div className="bg-slate-900 border border-slate-800 rounded-lg p-6 mb-6">
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-300 mb-2">Search</label>
+                                        <input
+                                            type="text"
+                                            placeholder="Product name or SKU..."
+                                            value={searchText}
+                                            onChange={(e) => setSearchText(e.target.value)}
+                                            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-300 mb-2">Grade</label>
+                                        <div className="flex gap-2">
+                                            {['All', 'A', 'B', 'C'].map(g => (
+                                                <button
+                                                    key={g}
+                                                    onClick={() => setGradeFilter(g)}
+                                                    className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
+                                                        gradeFilter === g
+                                                            ? 'bg-blue-600 text-white'
+                                                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                                                    }`}
+                                                >
+                                                    {g}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-300 mb-2">Status</label>
+                                        <select
+                                            value={statusFilter}
+                                            onChange={(e) => setStatusFilter(e.target.value)}
+                                            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded text-slate-100 focus:outline-none focus:border-blue-500"
+                                        >
+                                            {['All', 'CRITICAL', 'ORDER NOW', 'LOW', 'OK'].map(s => (
+                                                <option key={s} value={s}>{s}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-300 mb-2">Type</label>
+                                        <select
+                                            value={typeFilter}
+                                            onChange={(e) => setTypeFilter(e.target.value)}
+                                            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded text-slate-100 focus:outline-none focus:border-blue-500"
+                                        >
+                                            {types.map(t => (
+                                                <option key={t} value={t}>{t}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="flex items-end gap-2">
+                                        <button
+                                            onClick={() => fetchData(true)}
+                                            className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium transition-colors"
+                                        >
+                                            Refresh Data
+                                        </button>
+                                        <button
+                                            onClick={exportToCSV}
+                                            className="flex-1 px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded font-medium transition-colors"
+                                            title="Export current filtered view to CSV (opens in Excel)"
+                                        >
+                                            Export CSV
+                                        </button>
+                                    </div>
+                                </div>
+                                <p className="text-xs text-slate-500">
+                                    Showing {filteredProducts.length} of {data.products.length} products
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Main Table */}
+                        {data && data.products && (
+                            <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+                                <div className="overflow-x-auto scrollbar-hide">
+                                    <table className="w-full text-sm">
+                                        <thead className="bg-slate-800 border-b border-slate-700">
+                                            <tr>
+                                                <th className="text-center py-3 px-2 text-slate-300 font-semibold text-xs w-10">#</th>
+                                                <SortableHeader column="grade" label="Grade" />
+                                                <SortableHeader column="parentSku" label="Parent SKU" />
+                                                <SortableHeader column="name" label="Product Name" />
+                                                <SortableHeader column="type" label="Type" />
+                                                <SortableHeader column="stockOnHand" label="SOH" />
+                                                <SortableHeader column="onPurchase" label="On Purchase" />
+                                                <th className="text-left py-3 px-4 text-slate-300 font-semibold text-xs uppercase tracking-wide">PO#</th>
+                                                <SortableHeader column="weeklyVelocity" label="Weekly Vel" />
+                                                <SortableHeader column="weeksOfStock" label="Weeks of Stock" />
+                                                <SortableHeader column="demand8wk" label="8-Wk Demand" />
+                                                <SortableHeader column="minStock" label="Min Stock" />
+                                                <SortableHeader column="maxStock" label="Max Stock" />
+                                                <SortableHeader column="reorderPoint" label="Reorder Point" />
+                                                <SortableHeader column="reorderQty" label="Reorder Qty" />
+                                                <SortableHeader column="reorderDate" label="Reorder Date" />
+                                                <SortableHeader column="status" label="Status" />
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {filteredProducts.map((product, idx) => {
+                                                const isEdited = editedProducts[product.parentSku];
+                                                return (
+                                                    <tr key={product.parentSku} className="border-b border-slate-800 hover:bg-slate-850 transition-colors">
+                                                        <td className="text-center py-3 px-2 text-slate-500 text-xs">{idx + 1}</td>
+                                                        <td className="py-3 px-4"><GradeBadge grade={product.grade} /></td>
+                                                        <td className="py-3 px-4 font-mono text-slate-300">{product.parentSku}</td>
+                                                        <td
+                                                            onClick={() => {
+                                                                const variants = data.variants.filter(v => v.parentSku === product.parentSku);
+                                                                setSelectedVariants(variants);
+                                                                setSelectedProductName(product.name);
+                                                            }}
+                                                            className="py-3 px-4 text-slate-100 cursor-pointer hover:text-blue-400 transition-colors max-w-xs truncate"
+                                                        >
+                                                            {product.name}
+                                                        </td>
+                                                        <td className="py-3 px-4 text-slate-300">{product.type}</td>
+                                                        <td className="py-3 px-4 table-cell-edit" style={{ minWidth: '100px' }}>
+                                                            <input
+                                                                type="number"
+                                                                value={product.stockOnHand}
+                                                                onChange={(e) => handleSOHChange(product.parentSku, parseInt(e.target.value) || 0)}
+                                                                className="w-20"
+                                                            />
+                                                            {isEdited && <span className="edited-indicator"></span>}
+                                                        </td>
+                                                        <td className="py-3 px-4 table-cell-edit">
+                                                            <input
+                                                                type="number"
+                                                                value={product.onPurchase}
+                                                                onChange={(e) => handleOnPurchaseChange(product.parentSku, parseInt(e.target.value) || 0)}
+                                                                className="w-16"
+                                                            />
+                                                            {isEdited && <span className="edited-indicator"></span>}
+                                                        </td>
+                                                        <td className="py-3 px-4">
+                                                            {product.purchaseOrders && product.purchaseOrders.length > 0 ? (
+                                                                <button
+                                                                    onClick={() => setSelectedPOs(product.purchaseOrders)}
+                                                                    className="text-blue-400 hover:text-blue-300 underline font-mono"
+                                                                >
+                                                                    {product.purchaseOrders[0].poNumber}
+                                                                </button>
+                                                            ) : (
+                                                                <span className="text-slate-500">—</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="py-3 px-4 text-right text-slate-300">{product.weeklyVelocity.toFixed(2)}</td>
+                                                        <td className="py-3 px-4 text-right"><WeeksOfStockCell value={product.weeksOfStock} /></td>
+                                                        <td className="py-3 px-4 text-right text-slate-300">{product.demand8wk}</td>
+                                                        <td className="py-3 px-4 text-right text-slate-300">{product.minStock}</td>
+                                                        <td className="py-3 px-4 text-right text-slate-300">{product.maxStock}</td>
+                                                        <td className="py-3 px-4 text-right text-slate-300">{product.reorderPoint}</td>
+                                                        <td className="py-3 px-4 text-right font-bold" style={{ color: product.reorderQty > 0 ? '#fbbf24' : '#9ca3af' }}>
+                                                            {product.reorderQty}
+                                                        </td>
+                                                        <td className="py-3 px-4 text-slate-300">{product.reorderDate}</td>
+                                                        <td className="py-3 px-4"><StatusBadge status={product.status} /></td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                {filteredProducts.length === 0 && (
+                                    <div className="py-12 text-center text-slate-400">
+                                        <p>No products match your filters.</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Footer */}
+                        <div className="mt-8 pt-6 border-t border-slate-800">
+                            <p className="text-xs text-slate-500 text-center">
+                                Velocity = weighted avg (50% last 8wk, 30% prior 8wk, 20% earliest 8wk) — rolling 24wk window | Live data from Unleashed + PMA Sync + Yunfulfillment + Shopify
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* Modals */}
+                    <PODetailModal pos={selectedPOs} onClose={() => setSelectedPOs(null)} />
+                    <VariantModal variants={selectedVariants} productName={selectedProductName} onClose={() => setSelectedVariants(null)} />
+                </div>
+            );
+        };
+
+        // ============================================================================
+        // RENDER
+        // ============================================================================
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<DemandPlannerDashboard />);
+    </script>
+</body>
+</html>

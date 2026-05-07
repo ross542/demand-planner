@@ -1,0 +1,56 @@
+name: Refresh Demand Planner
+
+on:
+  schedule:
+    # 09:30 AEST (UTC+10) = 23:30 UTC previous day
+    # Cron in UTC: Sun-Thu 23:30 = Mon-Fri 09:30 AEST
+    - cron: "30 23 * * 0-4"
+  workflow_dispatch: # allow manual run from the Actions tab
+
+permissions:
+  contents: write # needed to push to gh-pages branch
+
+concurrency:
+  group: refresh-demand-planner
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci --omit=dev
+
+      - name: Run refresh
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          UNLEASHED_API_ID: ${{ secrets.UNLEASHED_API_ID }}
+          UNLEASHED_API_KEY: ${{ secrets.UNLEASHED_API_KEY }}
+          PMA_SYNC_BASE_URL: ${{ secrets.PMA_SYNC_BASE_URL }}
+          PMA_SYNC_API_KEY: ${{ secrets.PMA_SYNC_API_KEY }}
+          PMA_SYNC_API_SECRET: ${{ secrets.PMA_SYNC_API_SECRET }}
+          PMA_SYNC_USERNAME: ${{ secrets.PMA_SYNC_USERNAME }}
+          PMA_SYNC_PASSWORD: ${{ secrets.PMA_SYNC_PASSWORD }}
+          YUN_USERNAME: ${{ secrets.YUN_USERNAME }}
+          YUN_PASSWORD: ${{ secrets.YUN_PASSWORD }}
+        run: node refresh.js
+
+      - name: Publish to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          force_orphan: true
+          commit_message: "refresh ${{ github.run_number }} @ ${{ github.event.schedule || 'manual' }}"

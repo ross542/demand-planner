@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html>
+<head><title>AMAHC — Live Data Fetcher</title>
+<style>
+body { background: #0f172a; color: #e2e8f0; font-family: system-ui; padding: 20px; }
+pre { background: #1e293b; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 12px; max-height: 400px; overflow-y: auto; }
+.status { padding: 8px 16px; border-radius: 6px; margin: 8px 0; }
+.ok { background: #065f46; } .fail { background: #991b1b; } .pending { background: #92400e; }
+button { background: #3b82f6; color: white; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-size: 16px; margin: 8px; }
+button:hover { background: #2563eb; }
+h1 { color: #f1f5f9; }
+</style>
+</head>
+<body>
+<h1>A Man & His Cave — Live Data Fetcher</h1>
+<p>This page calls the Unleashed + Shopify APIs directly from your browser and sends the results to the backend.</p>
+<button onclick="runAll()">Fetch All Live Data</button>
+<button onclick="fetchUnleashed()">Unleashed Only</button>
+<button onclick="fetchShopify()">Shopify Only</button>
+
+<div id="log"></div>
+
+<script>
+const UNLEASHED_ID = "3c0ce866-0616-48d8-a910-8f6bfa5a4375";
+const UNLEASHED_KEY = "cCfVqd4HiuTziXYEviH6iZr4m8ipwCpfZs2PXjUjtDw9tXgpIDgKDGhmELfDPju9ayolbl5TvVM4DZgyLpfQ==";
+const SHOPIFY_STORE = "amahc.myshopify.com";
+const SHOPIFY_TOKEN = "shpca_529282bf2f614c85d14fb5475bb6a37";
+
+function log(msg, cls) {
+    const d = document.createElement('div');
+    d.className = 'status ' + (cls || 'pending');
+    d.textContent = msg;
+    document.getElementById('log').appendChild(d);
+}
+function logPre(data) {
+    const p = document.createElement('pre');
+    p.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+    document.getElementById('log').appendChild(p);
+}
+
+function safeB64Decode(b64) {
+    const stripped = b64.replace(/=/g, '');
+    const pad = (4 - stripped.length % 4) % 4;
+    return atob(stripped + '='.repeat(pad));
+}
+function b64ToU8(b64) {
+    const raw = safeB64Decode(b64);
+    const a = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) a[i] = raw.charCodeAt(i);
+    return a;
+}
+function u8ToB64(a) {
+    let s = '';
+    for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]);
+    return btoa(s);
+}
+
+async function unleashedSign(qs) {
+    const keyBytes = b64ToU8(UNLEASHED_KEY);
+    const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(qs));
+    return u8ToB64(new Uint8Array(sig));
+}
+
+async function unleashedGet(endpoint, qs) {
+    const sig = await unleashedSign(qs || '');
+    const url = qs ? `https://api.unleashedsoftware.com${endpoint}?${qs}` : `https://api.unleashedsoftware.com${endpoint}`;
+    const res = await fetch(url, {
+        headers: { 'api-auth-id': UNLEASHED_ID, 'api-auth-signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+    return res.json();
+}
+
+async function fetchUnleashedPOs() {
+    log('Fetching Unleashed Purchase Orders...', 'pending');
+    const allPOs = [];
+    let page = 1, hasMore = true;
+    while (hasMore) {
+        const qs = `pageSize=200&page=${page}&orderStatus=Open`;
+        const data = await unleashedGet('/PurchaseOrders', qs);
+        const items = data.Items || [];
+        allPOs.push(...items);
+        log(`  PO page ${page}: ${items.length} orders (total: ${allPOs.length})`, 'ok');
+        hasMore = page < (data.Pagination?.NumberOfPages || 1);
+        page++;
+    }
+    return allPOs;
+}
+
+async function fetchUnleashedSOH() {
+    log('Fetching Unleashed Stock on Hand...', 'pending');
+    const allSOH = [];
+    let page = 1, hasMore = true;
+    while (hasMore) {
+        const qs = `pageSize=200&page=${page}`;
+        const data = await unleashedGet('/StockOnHand', qs);
+        const items = data.Items || [];
+        allSOH.push(...items);
+        log(`  SOH page ${page}: ${items.length} items (total: ${allSOH.length})`, 'ok');
+        hasMore = page < (data.Pagination?.NumberOfPages || 1);
+        page++;
+    }
+    return allSOH;
+}
+
+async function fetchUnleashed() {
+    document.getElementById('log').innerHTML = '';
+    try {
+        const [pos, soh] = await Promise.all([fetchUnleashedPOs(), fetchUnleashedSOH()]);
+
+        // Map POs by SKU
+        const poMap = {};
+        for (const po of pos) {
+            const poNum = po.OrderNumber || po.PurchaseOrderNumber || 'N/A';
+            const eta = po.RequiredDate || po.DeliveryDate || null;
+            const supplier = po.Supplier?.SupplierName || 'Unknown';
+            for (const line of (po.PurchaseOrderLines || [])) {
+                const sku = line.Product?.ProductCode || line.ProductCode;
+                if (!sku) continue;
+                const outstanding = (line.OrderQuantity || 0) - (line.ReceivedQuantity || 0);
+                if (outstanding <= 0) continue;
+                if (!poMap[sku]) poMap[sku] = { total: 0, orders: [] };
+                poMap[sku].total += outstanding;
+                poMap[sku].orders.push({ poNumber: poNum, outstanding, eta: eta ? new Date(eta).toISOString().split('T')[0] : null, supplier });
+            }
+        }
+
+        // Map SOH by SKU
+        const sohMap = {};
+        for (const item of soh) {
+            const sku = item.ProductCode;
+            if (!sku) continue;
+            if (!sohMap[sku]) sohMap[sku] = 0;
+            sohMap[sku] += item.QtyOnHand || 0;
+        }
+
+        log(`DONE! ${pos.length} POs, ${Object.keys(poMap).length} SKUs with orders, ${Object.keys(sohMap).length} SOH SKUs`, 'ok');
+
+        window.__UNLEASHED_DATA = { poMap, sohMap, rawPOs: pos.length, rawSOH: soh.length };
+        logPre({ poSkus: Object.keys(poMap).length, sohSkus: Object.keys(sohMap).length, samplePO: Object.entries(poMap)[0], sampleSOH: Object.entries(sohMap).slice(0,5) });
+
+        // Post to backend
+        try {
+            await fetch('/api/live-data/unleashed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ poMap, sohMap }) });
+            log('Data sent to backend!', 'ok');
+        } catch(e) { log('Could not reach backend: ' + e.message, 'fail'); }
+
+        return { poMap, sohMap };
+    } catch(e) {
+        log('Unleashed FAILED: ' + e.message, 'fail');
+        logPre(e.stack);
+    }
+}
+
+async function shopifyGet(endpoint) {
+    const res = await fetch(`https://${SHOPIFY_STORE}/admin/api/2024-01${endpoint}`, {
+        headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN, 'Content-Type': 'application/json' }
+    });
+    if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+    const link = res.headers.get('link');
+    const data = await res.json();
+    let nextUrl = null;
+    if (link) { const m = link.match(/<([^>]+)>;\s*rel="next"/); if (m) nextUrl = m[1]; }
+    return { data, nextUrl };
+}
+
+async function fetchShopifyProducts() {
+    log('Fetching Shopify products...', 'pending');
+    const all = [];
+    let url = `/products.json?limit=250&fields=id,handle,title,product_type,variants`;
+    while (url) {
+        const { data, nextUrl } = await shopifyGet(url.startsWith('/') ? url : url.replace(`https://${SHOPIFY_STORE}/admin/api/2024-01`, ''));
+        all.push(...(data.products || []));
+        log(`  Products: ${all.length} loaded`, 'ok');
+        url = nextUrl;
+    }
+    return all;
+}
+
+async function fetchShopifyOrders(start, end) {
+    const all = [];
+    let url = `/orders.json?limit=250&status=any&financial_status=paid&created_at_min=${start}&created_at_max=${end}&fields=id,line_items`;
+    while (url) {
+        const { data, nextUrl } = await shopifyGet(url.startsWith('/') ? url : url.replace(`https://${SHOPIFY_STORE}/admin/api/2024-01`, ''));
+        all.push(...(data.orders || []));
+        url = nextUrl;
+    }
+    return all;
+}
+
+async function fetchShopify() {
+    document.getElementById('log').innerHTML = '';
+    try {
+        const products = await fetchShopifyProducts();
+
+        const now = new Date();
+        const w8ago = new Date(now); w8ago.setDate(w8ago.getDate() - 56);
+
+        log('Fetching order velocity (3 periods)...', 'pending');
+        const [recent, q4, q3] = await Promise.all([
+            fetchShopifyOrders(w8ago.toISOString(), now.toISOString()),
+            fetchShopifyOrders('2025-10-01T00:00:00+11:00', '2025-12-31T23:59:59+11:00'),
+            fetchShopifyOrders('2025-07-01T00:00:00+10:00', '2025-09-30T23:59:59+10:00'),
+        ]);
+        log(`Orders: ${recent.length} recent, ${q4.length} Q4, ${q3.length} Q3`, 'ok');
+
+        // Count sales per SKU per period
+        function countSales(orders) {
+            const m = {};
+            for (const o of orders) for (const li of (o.line_items||[])) if (li.sku) m[li.sku] = (m[li.sku]||0) + (li.quantity||0);
+            return m;
+        }
+        const r = countSales(recent), q4s = countSales(q4), q3s = countSales(q3);
+
+        window.__SHOPIFY_DATA = { products, velocityRecent: r, velocityQ4: q4s, velocityQ3: q3s };
+        log(`DONE! ${products.length} products, velocity for ${Object.keys(r).length}/${Object.keys(q4s).length}/${Object.keys(q3s).length} SKUs`, 'ok');
+
+        try {
+            await fetch('/api/live-data/shopify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ products: products.length, velocityRecent: r, velocityQ4: q4s, velocityQ3: q3s }) });
+            log('Data sent to backend!', 'ok');
+        } catch(e) { log('Could not reach backend: ' + e.message, 'fail'); }
+
+    } catch(e) {
+        log('Shopify FAILED: ' + e.message, 'fail');
+        logPre(e.stack);
+    }
+}
+
+async function runAll() {
+    document.getElementById('log').innerHTML = '';
+    log('=== Fetching ALL live data ===', 'pending');
+    await fetchUnleashed();
+    await fetchShopify();
+    log('=== ALL DONE ===', 'ok');
+}
+</script>
+</body>
+</html>
