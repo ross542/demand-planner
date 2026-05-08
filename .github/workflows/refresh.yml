@@ -55,16 +55,40 @@ jobs:
           force_orphan: true
           commit_message: "refresh ${{ github.run_number }} @ ${{ github.event.schedule || 'manual' }}"
 
-      - name: Notify Slack on failure
-        if: failure()
+      - name: Notify Slack
+        if: always()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ -z "$SLACK_WEBHOOK_URL" ]; then
-            echo "SLACK_WEBHOOK_URL not set; skipping."
-            exit 0
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then echo "No SLACK_WEBHOOK_URL; skipping"; exit 0; fi
+
+          if [ "$JOB_STATUS" = "success" ] && [ -f dist/summary.json ]; then
+            EMOJI=":white_check_mark:"
+            HEADER="Demand Planner refreshed"
+            PRODUCTS=$(jq -r '.productCount' dist/summary.json)
+            DUR=$(jq -r '.durationSec' dist/summary.json)
+            CRIT=$(jq -r '.statusCounts.CRITICAL // 0' dist/summary.json)
+            ORDER=$(jq -r '.statusCounts["ORDER NOW"] // 0' dist/summary.json)
+            LOW=$(jq -r '.statusCounts.LOW // 0' dist/summary.json)
+            OK=$(jq -r '.statusCounts.OK // 0' dist/summary.json)
+            BODY="*${PRODUCTS}* products in ${DUR}s — :red_circle: ${CRIT} CRITICAL · :large_orange_circle: ${ORDER} ORDER NOW · :large_yellow_circle: ${LOW} LOW · :large_green_circle: ${OK} OK"
+            DASH="<https://ross542.github.io/demand-planner/|Open dashboard>"
+          else
+            EMOJI=":x:"
+            HEADER="Demand Planner FAILED"
+            BODY="Job status: \`${JOB_STATUS}\`"
+            DASH="<${RUN_URL}|View run logs>"
           fi
-          payload=$(printf '{"text":":x: *Demand planner refresh failed* — run #%s\\n<%s|View run>"}' \
-            "${{ github.run_number }}" "$RUN_URL")
-          curl -sS -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || true
+
+          jq -n --arg emoji "$EMOJI" --arg header "$HEADER" --arg body "$BODY" --arg dash "$DASH" --arg run "$RUN_URL" '{
+            text: ($emoji + " " + $header),
+            blocks: [
+              { type: "header", text: { type: "plain_text", text: ($emoji + " " + $header) } },
+              { type: "section", text: { type: "mrkdwn", text: $body } },
+              { type: "context", elements: [
+                { type: "mrkdwn", text: ($dash + " · <" + $run + "|run #" + env.GITHUB_RUN_NUMBER + ">") }
+              ]}
+            ]
+          }' | curl -sS -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL"

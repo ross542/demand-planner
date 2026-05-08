@@ -53,9 +53,20 @@ async function main() {
     return acc;
   }, {});
 
+  // Summary for downstream notifications (Slack)
+  const summary = {
+    productCount: data.products.length,
+    variantCount: (data.variants || []).length,
+    durationSec: Math.round(ms / 100) / 10,
+    statusCounts: counts,
+    sources: data.meta?.sources || {},
+    generatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(summary, null, 2));
+
   console.log(`Built ${data.products.length} products in ${(ms / 1000).toFixed(1)}s`);
   console.log(`Status: ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(', ')}`);
-  console.log(`Wrote: dist/snapshot.json, dist/index.html`);
+  console.log(`Wrote: dist/snapshot.json, dist/index.html, dist/summary.json`);
 }
 
 main().catch((err) => {
