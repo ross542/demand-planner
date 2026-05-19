@@ -1,0 +1,17 @@
+{
+  "productCount": 228,
+  "variantCount": 327,
+  "durationSec": 91.7,
+  "statusCounts": {
+    "OK": 157,
+    "CRITICAL": 60,
+    "ORDER NOW": 11
+  },
+  "sources": {
+    "soh": "PMA Sync + Yunfulfillment",
+    "purchaseOrders": "Unleashed",
+    "velocity": "Shopify (weighted)",
+    "productCatalog": "Shopify"
+  },
+  "generatedAt": "2026-05-19T01:29:52.102Z"
+}
